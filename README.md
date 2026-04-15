@@ -8,7 +8,7 @@
   SRN: PES2UG24CS716  
 
 Fork Repository:  
-https://github.com/8figalltimepro/OS-Jackfruit  
+https://github.com/8figalltimepro/OS-Jackfruit-703-716 
 
 ---
 
