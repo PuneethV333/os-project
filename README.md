@@ -1,14 +1,14 @@
 # Multi-Container Runtime
 
 ## Team Information
-- Name: Samarth Mohan  
-  SRN: PES1UG24CS703  
+- **Name:** Puneeth V
+  **SRN:** PES1UG24CS686
 
-- Name: Sujeet V Bire  
-  SRN: PES2UG24CS716  
+- **Name:** Tejas UL
+  **SRN:** PES1UG24CS715
 
-Fork Repository:  
-https://github.com/8figalltimepro/OS-Jackfruit-703-716 
+Fork Repository:
+https://github.com/shivangjhalani/OS-Jackfruit/tree/main
 
 ---
 
@@ -18,35 +18,36 @@ This project is a lightweight Linux container runtime built from scratch in C. I
 
 It allows you to:
 - Run isolated processes (containers)
-- Monitor memory usage
-- Capture logs
+- Monitor memory usage via a kernel module
+- Capture and stream container logs
 
 ---
 
 ## Architecture
 
-1. Supervisor (User-Space)  
-   Launches containers, stores logs, and listens for commands.
+1. **Supervisor (User-Space)**
+   Launches containers, stores logs, and listens for commands via a UNIX socket.
 
-2. Monitor (Kernel-Space)  
-   A kernel module that tracks container memory usage.
+2. **Monitor (Kernel-Space)**
+   A kernel module (`monitor.ko`) that tracks container memory usage and enforces soft/hard limits.
 
 ---
 
 ## Features
 
-- Run multiple containers simultaneously  
-- Commands: `start`, `ps`, `logs`, `stop`  
-- Automatic log capture  
-- Memory limits (soft warning and hard kill)  
-- CPU vs I/O scheduling experiment  
+- Run multiple containers simultaneously
+- Commands: `start`, `run`, `ps`, `logs`, `stop`
+- Automatic log capture via bounded buffer
+- Memory limits (soft warning and hard kill via kernel module)
+- CPU scheduling experiment with nice values
+- CPU-bound vs I/O-bound scheduling observation
+- Clean teardown with no zombie processes
 
 ---
 
 ## How to Build and Run
 
-Recommended: Ubuntu VM  
-Mac M1: Use `aarch64` Alpine image  
+**Recommended:** Ubuntu 22.04/24.04 (native or dual boot — WSL will not work)
 
 ### 1. Install Dependencies
 
@@ -55,136 +56,147 @@ sudo apt update
 sudo apt install -y build-essential linux-headers-$(uname -r)
 ```
 
-### 2. Set Up Filesystem
+### 2. Clone and Enter Boilerplate
+
+```bash
+git clone https://github.com/shivangjhalani/OS-Jackfruit.git
+cd OS-Jackfruit/boilerplate
+```
+
+### 3. Set Up Root Filesystem
 
 ```bash
 mkdir -p rootfs-base
-
-wget https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/aarch64/alpine-minirootfs-3.20.3-aarch64.tar.gz
-
-tar -xzf alpine-minirootfs-3.20.3-aarch64.tar.gz -C rootfs-base
+wget https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64/alpine-minirootfs-3.20.3-x86_64.tar.gz
+tar -xzf alpine-minirootfs-3.20.3-x86_64.tar.gz -C rootfs-base
 
 cp -a ./rootfs-base ./rootfs-alpha
 cp -a ./rootfs-base ./rootfs-beta
-cp -a ./rootfs-base ./rootfs-gamma
 ```
 
-### 3. Compile
+### 4. Fix Kernel 6.16+ Compatibility and Compile
 
 ```bash
-cd boilerplate
-make clean
+# Fix for kernel 6.16+ (del_timer_sync renamed)
+sed -i 's/del_timer_sync/timer_delete_sync/g' monitor.c
+
 make
 ```
 
-### 4. Load Kernel Module and Copy Workloads
+This produces:
+- `engine` — the supervisor/CLI binary
+- `monitor.ko` — the kernel module
+- `cpu_hog`, `io_pulse`, `memory_hog` — test workload binaries
+
+### 5. Load Kernel Module
 
 ```bash
 sudo insmod monitor.ko
-
-cp ./memory_hog ../rootfs-alpha/
-cp ./cpu_hog ../rootfs-beta/
-cp ./io_pulse ../rootfs-gamma/
+ls -l /dev/container_monitor       # verify device created
+sudo dmesg | grep container_monitor | tail -5
 ```
 
-### 5. Start Supervisor
+### 6. Copy Workloads into Rootfs
 
 ```bash
-sudo ./engine supervisor ../rootfs-base
+cp ./cpu_hog ./rootfs-alpha/
+cp ./memory_hog ./rootfs-alpha/
+cp ./io_pulse ./rootfs-alpha/
+cp ./cpu_hog ./rootfs-beta/
+cp ./memory_hog ./rootfs-beta/
 ```
 
-Run commands in another terminal:
+### 7. Start the Supervisor (Terminal A)
 
 ```bash
+mkdir -p logs
+sudo ./engine supervisor ./rootfs-base
+```
+
+Expected output:
+```
+[supervisor] Running. rootfs=./rootfs-base socket=/tmp/mini_runtime.sock
+```
+
+### 8. Run Containers (Terminal B)
+
+```bash
+# Start two containers
+sudo ./engine start alpha ./rootfs-alpha /cpu_hog --soft-mib 48 --hard-mib 80
+sudo ./engine start beta  ./rootfs-beta  /cpu_hog --soft-mib 64 --hard-mib 96
+
+# List containers
 sudo ./engine ps
+
+# View logs
+sudo ./engine logs alpha
+
+# Stop containers
+sudo ./engine stop alpha
+sudo ./engine stop beta
 ```
 
 ---
 
 ## Demo & Feature Walkthrough
 
-Here is a step-by-step look at what our runtime can do.
+### 1. Multi-Container Supervision
+Multiple isolated containers started simultaneously. The supervisor tracks all of them.
 
-### 1. Multi-container supervision
-We can easily start multiple isolated containers at the exact same time. The supervisor tracks them all simultaneously without slowing down.  
-
-![Screenshot 1](docs/screenshots/sc1.png)
+![sc1](docs/1.png)
 
 ---
 
-### 2. Metadata tracking
-By running:
+### 2. Metadata Tracking (`ps`)
+Running `sudo ./engine ps` shows a live table with PIDs, state, uptime, and memory limits.
+
+![sc2](docs/2.png)
+
+---
+
+### 3. Bounded-Buffer Logging
+Container stdout is captured via a pipe into a bounded buffer and flushed to `logs/<id>.log`.
 
 ```bash
-sudo ./engine ps
+sudo ./engine logs alpha
 ```
 
-we get a table showing the live status, Process IDs (PIDs), and uptime of all running containers.  
-
-![Screenshot 2](docs/screenshots/sc2.png)
+![sc3](docs/3.png)
 
 ---
 
-### 3. Bounded-buffer logging
-When a container outputs text, the supervisor captures it and saves it to a log file inside the `logs/` directory. You can read them anytime using the `logs` command.  
+### 4. CLI and IPC (UNIX Socket)
+Commands are sent from a client terminal to the background supervisor via a UNIX socket at `/tmp/mini_runtime.sock`.
 
-![Screenshot 3](docs/screenshots/sc3.png)
-
----
-
-### 4. CLI and IPC (Communication)
-Commands (like `ps`) are sent from a client terminal and communicated to the background supervisor using UNIX sockets.  
-
-![Screenshot 4](docs/screenshots/sc4.png)
+![sc4](docs/4.png)
 
 ---
 
-### 5. Soft-limit warning
-A memory "soft limit" is set. If a container exceeds this threshold, the kernel module prints a warning in system logs (`dmesg`).  
-
-![Screenshot 5](docs/screenshots/sc5.png)
-
----
-
-### 6. Hard-limit enforcement
-A "hard limit" is enforced to protect the system. If exceeded, the kernel module kills the container, and the `ps` output shows `hard_limit_killed`.  
-
-![Screenshot 6](docs/screenshots/sc6.png)
-
----
-
-### 7. Scheduling experiment
-A CPU-heavy task and an I/O-heavy task are run together with different priorities.  
-I/O tasks finish faster because they yield CPU frequently, while CPU-bound tasks continue running.  
-
-![Screenshot 7](docs/screenshots/sc7.png)
-
----
-
-### 8. Clean teardown
-All containers are stopped, the supervisor is terminated, and the kernel module is removed. System is checked to ensure no leftover processes remain.  
+### 5. Soft-Limit Warning
+When a container exceeds the soft memory limit, the kernel module prints a warning in `dmesg`.
 
 ```bash
-sudo ./engine stop
-sudo rmmod monitor
-ps aux | grep engine
+sudo dmesg | grep container_monitor | tail -10
 ```
 
-![Screenshot 8](docs/screenshots/sc8.png)
+![sc5](docs/5.png)
 
 ---
 
 ## How It Works
 
-**Isolation**  
-Uses Linux namespaces and `chroot` to give each container its own filesystem and process space.
+**Isolation**
+Uses Linux namespaces (`CLONE_NEWPID`, `CLONE_NEWNS`, `CLONE_NEWUTS`) and `chroot()` to give each container its own filesystem and process space.
 
-**Supervisor**  
-A parent process that launches containers, handles commands, and cleans up processes.
+**Supervisor**
+A long-running daemon that accepts connections on a UNIX socket, spawns containers via `clone()`, and manages their lifecycle with `SIGCHLD`/`SIGTERM` handling.
 
-**Memory Limits**  
-The kernel module monitors RSS (Resident Set Size) to trigger warnings or enforce limits.
+**Memory Limits**
+The kernel module (`monitor.ko`) monitors RSS via `/proc/<pid>/status` on a timer. Soft limit triggers a `dmesg` warning; hard limit sends `SIGKILL`.
 
-**Communication (IPC)**  
-- Sockets: CLI to supervisor communication  
-- Pipes: Container output to log files  
+**Communication (IPC)**
+- **UNIX Sockets:** CLI-to-supervisor communication
+- **Pipes:** Container stdout/stderr captured into the bounded buffer for logging
+
+**Scheduling**
+Uses `setpriority()` (nice values) to influence the Linux CFS scheduler. Lower nice = more CPU time. I/O-bound tasks naturally get higher interactive priority due to frequent blocking.
